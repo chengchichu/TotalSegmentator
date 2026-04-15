@@ -43,6 +43,14 @@ def convert_device_to_cuda(device):
         return f"cuda:{device.split(':')[1]}"
 
 
+def convert_device_to_string(device):
+    if hasattr(device, 'type'):  # torch.device object
+        if device.type == "cuda":
+            return "gpu"
+        else:
+            return device.type
+
+
 def select_device(device):
     device = convert_device_to_cuda(device)
 
@@ -141,6 +149,7 @@ def totalsegmentator(input: Union[str, Path, Nifti1Image], output: Union[str, Pa
 
     from totalsegmentator.nnunet import nnUNet_predict_image  # this has to be after setting new env vars
 
+    crop_model = None
     crop_addon = [3, 3, 3]  # default value
 
     if task == "total":
@@ -382,8 +391,76 @@ def totalsegmentator(input: Union[str, Path, Nifti1Image], output: Union[str, Pa
         model = "3d_fullres"
         folds = [0]
         if fast: raise ValueError("task liver_segments_mr does not work with option --fast")
+    elif task == "liver_lesions":
+        task_id = 591
+        resample = [0.75, 0.75, 1.0]
+        trainer = "nnUNetTrainer"
+        crop = ["liver"]
+        crop_addon = [10, 10, 10]
+        robust_crop = True
+        model = "3d_fullres_high"
+        folds = [0]
+        if fast: raise ValueError("task liver_lesions does not work with option --fast")
+    elif task == "liver_lesions_mr":
+        task_id = 589
+        resample = [0.8603515625, 0.857421875, 1.0]
+        trainer = "nnUNetTrainer_DASegOrd0"
+        crop = ["liver"]
+        crop_addon = [3, 3, 3]
+        robust_crop = True
+        model = "3d_fullres"
+        folds = [0]
+        if fast: raise ValueError("task liver_lesions_mr does not work with option --fast")
+    elif task == "craniofacial_structures":
+        task_id = 115
+        resample = [0.5, 0.5, 0.5]
+        trainer = "nnUNetTrainer_DASegOrd0_NoMirroring"
+        crop = ["skull"]
+        crop_addon = [20, 20, 20]
+        model = "3d_fullres"
+        folds = [0]
+        if fast: raise ValueError("task craniofacial_structures does not work with option --fast")
+    # This model only segments within T4-L4. In training only labels in this region were annotated. Therefore,
+    # I do not have to crop to this region, but model automatically only predicts in this region.
+    elif task == "abdominal_muscles":
+        task_id = 952
+        resample = [0.75, 0.75, 1]
+        trainer = "nnUNetTrainer_DASegOrd0_NoMirroring"
+        crop = ["body_trunc"]
+        crop_addon = [5, 5, 5]
+        model = "3d_fullres_high"
+        folds = [0]
+        if fast: raise ValueError("task abdominal_muscles does not work with option --fast")
+    elif task == "teeth":
+        task_id = 113  # trained with nnUNet v2.6.2; might not be compatible with older nnunet versions
+        resample = [0.5, 0.5, 0.5]
+        trainer = "nnUNetTrainer_onlyMirror01"
+        # mandible not included, because would increase FOV way too much -> many wrong segmentation in regions outside of teeth
+        # (model was trained on pretty narrow FOV because of CBCT data)
+        crop = ["teeth_lower", "teeth_upper"]
+        crop_model = "craniofacial_structures"
+        crop_addon = [10, 10, 10]
+        model = "3d_lowres_high"
+        folds = [0]
+        if fast: raise ValueError("task teeth does not work with option --fast")
+    elif task == "trunk_cavities":
+        task_id = 343
+        resample = [1.5, 1.5, 1.5]
+        trainer = "nnUNetTrainer"
+        crop = None
+        model = "3d_fullres"
+        folds = [0]
+        if fast: raise ValueError("task trunk_cavities does not work with option --fast")
+    elif task == "brain_aneurysm":
+        task_id = 615
+        resample = [0.390625, 0.390625, 0.5000016391277313]
+        trainer = "nnUNetTrainerDiceTopK10Loss_2000epochs"
+        crop = None  # no cropping needed, because TOF MRI images only cover brain
+        model = "3d_fullres"
+        folds = None
+        if not quiet: print("INFO: This task only works with TOF MRI images.\n")
+        if fast: raise ValueError("task brain_aneurysm does not work with option --fast")
 
-        
     # Commercial models
     elif task == "vertebrae_body":
         task_id = 305
@@ -496,6 +573,16 @@ def totalsegmentator(input: Union[str, Path, Nifti1Image], output: Union[str, Pa
         if fast: raise ValueError("task thigh_shoulder_muscles_mr does not work with option --fast")
         show_license_info()
     elif task == "coronary_arteries":
+        task_id = 509
+        resample = [0.7, 0.7, 0.7]
+        trainer = "nnUNetTrainerSkeletonRecall"
+        crop = ["heart"]
+        crop_addon = [20, 20, 20]
+        model = "3d_fullres_high"
+        folds = [0]
+        if fast: raise ValueError("task coronary_arteries does not work with option --fast")
+        show_license_info()
+    elif task == "coronary_arteries_LEGACY":
         task_id = 507
         resample = [0.7, 0.7, 0.7]
         trainer = "nnUNetTrainer_DASegOrd0_NoMirroring"
@@ -503,7 +590,7 @@ def totalsegmentator(input: Union[str, Path, Nifti1Image], output: Union[str, Pa
         crop_addon = [20, 20, 20]
         model = "3d_fullres_high"
         folds = [0]
-        if fast: raise ValueError("task coronary_arteries does not work with option --fast")
+        if fast: raise ValueError("task coronary_arteries_LEGACY does not work with option --fast")
         show_license_info()
     elif task == "aortic_sinuses":
         task_id = 920
@@ -573,30 +660,38 @@ def totalsegmentator(input: Union[str, Path, Nifti1Image], output: Union[str, Pa
         body_seg = False  # can not be used together with body_seg
         st = time.time()
         if not quiet: print("Generating rough segmentation for cropping...")
-        if robust_rs or robust_crop:
-            print("  (Using more robust (but slower) 3mm model for cropping.)")
-            crop_model_task = 852 if task.endswith("_mr") else 297
-            crop_spacing = 3.0
-        else:
-            # For MR always run 3mm model for cropping, because 6mm too bad results
-            #  (runtime for 3mm still very good for MR)
-            if task.endswith("_mr"):
-                crop_model_task = 852
+
+        if crop_model is None:  # use default "total" model for cropping
+            if robust_rs or robust_crop:
+                print("  (Using more robust (but slower) 3mm model for cropping.)")
+                crop_model_task = 852 if task.endswith("_mr") else 297
                 crop_spacing = 3.0
             else:
-                crop_model_task = 298
-                crop_spacing = 6.0
-        crop_task = "total_mr" if task.endswith("_mr") else "total"
-        crop_trainer = "nnUNetTrainer_2000epochs_NoMirroring" if task.endswith("_mr") else "nnUNetTrainer_4000epochs_NoMirroring"
-        #download_pretrained_weights(crop_model_task)
-        
-        organ_seg, _, _ = nnUNet_predict_image(input, None, crop_model_task, model="3d_fullres", folds=[0],
-                            trainer=crop_trainer, tta=False, multilabel_image=True, resample=crop_spacing,
-                            crop=None, crop_path=None, task_name=crop_task, nora_tag="None", preview=False,
-                            save_binary=False, nr_threads_resampling=nr_thr_resamp, nr_threads_saving=1,
-                            crop_addon=crop_addon, output_type=output_type, statistics=False,
-                            quiet=quiet, verbose=verbose, test=0, skip_saving=False, device=device)
-        class_map_inv = {v: k for k, v in class_map[crop_task].items()}
+                # For MR always run 3mm model for cropping, because 6mm too bad results
+                #  (runtime for 3mm still very good for MR)
+                if task.endswith("_mr"):
+                    crop_model_task = 852
+                    crop_spacing = 3.0
+                else:
+                    crop_model_task = 298
+                    crop_spacing = 6.0
+            crop_task = "total_mr" if task.endswith("_mr") else "total"
+            crop_trainer = "nnUNetTrainer_2000epochs_NoMirroring" if task.endswith("_mr") else "nnUNetTrainer_4000epochs_NoMirroring"
+            #download_pretrained_weights(crop_model_task)
+            
+            organ_seg, _, _ = nnUNet_predict_image(input, None, crop_model_task, model="3d_fullres", folds=[0],
+                                trainer=crop_trainer, tta=False, multilabel_image=True, resample=crop_spacing,
+                                crop=None, crop_path=None, task_name=crop_task, nora_tag="None", preview=False,
+                                save_binary=False, nr_threads_resampling=nr_thr_resamp, nr_threads_saving=1,
+                                crop_addon=crop_addon, output_type=output_type, statistics=False,
+                                quiet=quiet, verbose=verbose, test=0, skip_saving=False, device=device)
+            class_map_inv = {v: k for k, v in class_map[crop_task].items()}
+        else:
+            # If crop_model is specified, run totalsegmentator for the crop model
+            organ_seg = totalsegmentator(input, None, task=crop_model, nr_thr_resamp=nr_thr_resamp,
+                                         device=convert_device_to_string(device), quiet=quiet, verbose=verbose)
+            class_map_inv = {v: k for k, v in class_map[crop_model].items()}
+
         crop_mask = np.zeros(organ_seg.shape, dtype=np.uint8)
         organ_seg_data = organ_seg.get_fdata()
         # roi_subset_crop = [map_to_total[roi] if roi in map_to_total else roi for roi in roi_subset]
@@ -604,7 +699,7 @@ def totalsegmentator(input: Union[str, Path, Nifti1Image], output: Union[str, Pa
         for roi in roi_subset_crop:
             crop_mask[organ_seg_data == class_map_inv[roi]] = 1
         crop_mask = nib.Nifti1Image(crop_mask, organ_seg.affine)
-        crop_addon = [20,20,20]
+        crop_addon = [20,20,20] if crop_model is None else crop_addon
         crop = crop_mask
         if verbose: print(f"Rough organ segmentation generated in {time.time()-st:.2f}s")
 
