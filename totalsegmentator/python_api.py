@@ -677,6 +677,11 @@ def totalsegmentator(input: Union[str, Path, Nifti1Image], output: Union[str, Pa
                     crop_spacing = 6.0
             crop_task = "total_mr" if task.endswith("_mr") else "total"
             crop_trainer = "nnUNetTrainer_2000epochs_NoMirroring" if task.endswith("_mr") else "nnUNetTrainer_4000epochs_NoMirroring"
+            if crop is not None and ("body_trunc" in crop or "body_extremities" in crop):
+                crop_model_task = 300
+                crop_spacing = 6.0
+                crop_trainer = "nnUNetTrainer"
+                crop_task = "body"
             #download_pretrained_weights(crop_model_task)
             
             organ_seg, _, _ = nnUNet_predict_image(input, None, crop_model_task, model="3d_fullres", folds=[0],
